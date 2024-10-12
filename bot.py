@@ -19,17 +19,17 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=TELEGRAM_TOKEN)
 dp = Dispatcher(bot)
 
-# Укажи здесь свой ID администратора
-ADMIN_ID = 400783137
+# Укажи свой ID администратора
+ADMIN_ID = 400783137  # Замени на свой ID
 
 # Настройка OpenAI API
 openai.api_key = OPENAI_API_KEY
 
-# Подключение к базе данных
+# Подключение к базе данных SQLite
 conn = sqlite3.connect('conversations.db')
 cursor = conn.cursor()
 
-# Создаём таблицы для переписок и пользователей
+# Создаём таблицы для переписок и пользователей, если их нет
 cursor.execute('''
     CREATE TABLE IF NOT EXISTS conversations (
         user_id INTEGER,
@@ -55,7 +55,7 @@ def get_all_users() -> List[int]:
     rows = cursor.fetchall()
     return [row[0] for row in rows]
 
-# Функция для сохранения сообщения в базе данных
+# Функция для сохранения сообщений в базе данных
 def save_message(user_id: int, role: str, content: str):
     cursor.execute(
         'INSERT INTO conversations (user_id, role, content) VALUES (?, ?, ?)',
@@ -63,31 +63,34 @@ def save_message(user_id: int, role: str, content: str):
     )
     conn.commit()
 
-# Функция для загрузки переписки из базы данных
-def load_conversation(user_id: int) -> List[Dict[str, str]]:
-    cursor.execute('SELECT role, content FROM conversations WHERE user_id = ?', (user_id,))
-    rows = cursor.fetchall()
-    if not rows:
-        # Если переписки нет, начинаем с системного промпта
-        return [SYSTEM_PROMPT]
-    return [{'role': role, 'content': content} for role, content in rows]
-
-# Описание стиля бота
+# Описание стиля общения бота
 SYSTEM_PROMPT = {
     "role": "system",
     "content": (
         "Ты — старый тренер по волейболу, который жил в советском союзе. Ты строгий, придирчивый и любишь покритиковать. "
         "Обращаешься ко всем на 'ты'. Ненавидишь все другие командные виды спорта и современные увлечения, такие как аниме. "
-        "На шутки реагируешь негативно, часто критикуешь, и любишь напоминать о старых временах."
+        "На шутки реагируешь негативно, часто критикуешь и напоминаешь о старых временах."
     )
 }
+
+# Функция для загрузки переписки из базы данных
+def load_conversation(user_id: int) -> List[Dict[str, str]]:
+    cursor.execute('SELECT role, content FROM conversations WHERE user_id = ?', (user_id,))
+    rows = cursor.fetchall()
+
+    # Всегда начинаем с SYSTEM_PROMPT, если переписки нет
+    conversation = [SYSTEM_PROMPT]
+    if rows:
+        conversation.extend([{'role': role, 'content': content} for role, content in rows])
+    
+    return conversation
 
 # Функция для общения с OpenAI GPT-4 Turbo
 async def ask_openai(user_id: int, prompt: str) -> str:
     conversation = load_conversation(user_id)  # Загружаем переписку
 
     conversation.append({"role": "user", "content": prompt})
-    save_message(user_id, "user", prompt)
+    save_message(user_id, "user", prompt)  # Сохраняем сообщение пользователя
 
     try:
         response = await openai.ChatCompletion.acreate(
@@ -96,7 +99,7 @@ async def ask_openai(user_id: int, prompt: str) -> str:
             temperature=0.7
         )
         bot_reply = response["choices"][0]["message"]["content"].strip()
-        save_message(user_id, "assistant", bot_reply)
+        save_message(user_id, "assistant", bot_reply)  # Сохраняем ответ бота
         return bot_reply
     except Exception as e:
         logging.error(f"Ошибка при обращении к OpenAI: {e}")
@@ -129,8 +132,8 @@ async def handle_message(message: types.Message):
     user_id = message.from_user.id
     save_user(user_id)  # Сохраняем ID пользователя
     await bot.send_chat_action(chat_id=message.chat.id, action="typing")  # Эффект "печатает..."
-    reply = await ask_openai(user_id, message.text)
-    await message.answer(reply)
+    reply = await ask_openai(user_id, message.text)  # Получаем ответ от OpenAI
+    await message.answer(reply)  # Отправляем ответ пользователю
 
 # Запуск бота
 if __name__ == "__main__":
