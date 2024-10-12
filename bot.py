@@ -20,7 +20,7 @@ bot = Bot(token=TELEGRAM_TOKEN)
 dp = Dispatcher(bot)
 
 # Укажи здесь свой ID администратора
-ADMIN_ID = 400783137  # Замени на свой ID
+ADMIN_ID = 400783137
 
 # Настройка OpenAI API
 openai.api_key = OPENAI_API_KEY
@@ -67,6 +67,9 @@ def save_message(user_id: int, role: str, content: str):
 def load_conversation(user_id: int) -> List[Dict[str, str]]:
     cursor.execute('SELECT role, content FROM conversations WHERE user_id = ?', (user_id,))
     rows = cursor.fetchall()
+    if not rows:
+        # Если переписки нет, начинаем с системного промпта
+        return [SYSTEM_PROMPT]
     return [{'role': role, 'content': content} for role, content in rows]
 
 # Описание стиля бота
@@ -81,9 +84,7 @@ SYSTEM_PROMPT = {
 
 # Функция для общения с OpenAI GPT-4 Turbo
 async def ask_openai(user_id: int, prompt: str) -> str:
-    conversation = load_conversation(user_id)
-    if not conversation:
-        conversation = [SYSTEM_PROMPT]
+    conversation = load_conversation(user_id)  # Загружаем переписку
 
     conversation.append({"role": "user", "content": prompt})
     save_message(user_id, "user", prompt)
@@ -126,8 +127,8 @@ async def broadcast_message(message: types.Message):
 @dp.message_handler()
 async def handle_message(message: types.Message):
     user_id = message.from_user.id
-    save_user(user_id)
-    await bot.send_chat_action(chat_id=message.chat.id, action="typing")
+    save_user(user_id)  # Сохраняем ID пользователя
+    await bot.send_chat_action(chat_id=message.chat.id, action="typing")  # Эффект "печатает..."
     reply = await ask_openai(user_id, message.text)
     await message.answer(reply)
 
