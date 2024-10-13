@@ -3,6 +3,7 @@ import logging
 import sqlite3
 from aiogram import Bot, Dispatcher, types, executor
 from typing import List, Dict
+import tiktoken  # Для подсчёта токенов
 
 # Вставь свои токены:
 TELEGRAM_TOKEN = "7976844185:AAG-ifHnwd2pu4EB69aWReFUHRgC0Ui2z9o"
@@ -44,6 +45,16 @@ cursor.execute('''
 ''')
 conn.commit()
 
+# Описание стиля общения бота
+SYSTEM_PROMPT = {
+    "role": "system",
+    "content": (
+        "Ты — старый тренер по волейболу, который жил в советском союзе. Ты строгий, придирчивый и любишь покритиковать. "
+        "Обращаешься ко всем на 'ты'. Ненавидишь все другие командные виды спорта и современные увлечения, такие как аниме. "
+        "На шутки реагируешь негативно, часто критикуешь и напоминаешь о старых временах."
+    )
+}
+
 # Функция для сохранения ID пользователя
 def save_user(user_id: int):
     cursor.execute('INSERT OR IGNORE INTO users (user_id) VALUES (?)', (user_id,))
@@ -63,49 +74,65 @@ def save_message(user_id: int, role: str, content: str):
     )
     conn.commit()
 
-# Описание стиля общения бота
-SYSTEM_PROMPT = {
-    "role": "system",
-    "content": (
-        "Ты — старый тренер по волейболу, который жил в советском союзе. Ты строгий, придирчивый и любишь покритиковать. "
-        "Обращаешься ко всем на 'ты'. Ненавидишь все другие командные виды спорта и современные увлечения, такие как аниме. "
-        "На шутки реагируешь негативно, часто критикуешь и напоминаешь о старых временах."
-    )
-}
-
-# Функция для загрузки переписки из базы данных
-def load_conversation(user_id: int) -> List[Dict[str, str]]:
-    cursor.execute('SELECT role, content FROM conversations WHERE user_id = ?', (user_id,))
+# Функция для загрузки переписки
+def load_conversation(user_id: int, limit: int = 10) -> List[Dict[str, str]]:
+    cursor.execute('SELECT role, content FROM conversations WHERE user_id = ? ORDER BY rowid DESC LIMIT ?', (user_id, limit))
     rows = cursor.fetchall()
 
-    # Всегда начинаем с SYSTEM_PROMPT, если переписки нет
+    # Всегда начинаем с SYSTEM_PROMPT
     conversation = [SYSTEM_PROMPT]
     if rows:
-        conversation.extend([{'role': role, 'content': content} for role, content in rows])
+        conversation.extend(reversed([{'role': role, 'content': content} for role, content in rows]))
     
     return conversation
 
-# Функция для общения с OpenAI GPT-4 Turbo
-async def ask_openai(user_id: int, prompt: str) -> str:
-    conversation = load_conversation(user_id)  # Загружаем переписку
+# Функция для подсчёта токенов
+def count_tokens(messages: List[Dict[str, str]], model: str = "gpt-4-turbo") -> int:
+    encoding = tiktoken.encoding_for_model(model)
+    num_tokens = 0
+    for message in messages:
+        num_tokens += len(encoding.encode(message['content']))
+    return num_tokens
+
+# Функция для общения с OpenAI
+async def ask_openai(user_id: int, prompt: str, model: str = "gpt-4-turbo") -> str:
+    conversation = load_conversation(user_id)
 
     conversation.append({"role": "user", "content": prompt})
-    save_message(user_id, "user", prompt)  # Сохраняем сообщение пользователя
+    save_message(user_id, "user", prompt)
+
+    # Ограничиваем переписку до 3000 токенов
+    while count_tokens(conversation, model=model) > 3000:
+        conversation.pop(1)  # Удаляем самые старые сообщения
 
     try:
         response = await openai.ChatCompletion.acreate(
-            model="gpt-4-turbo",
+            model=model,
             messages=conversation,
             temperature=0.7
         )
         bot_reply = response["choices"][0]["message"]["content"].strip()
-        save_message(user_id, "assistant", bot_reply)  # Сохраняем ответ бота
+        save_message(user_id, "assistant", bot_reply)
         return bot_reply
     except Exception as e:
         logging.error(f"Ошибка при обращении к OpenAI: {e}")
         return "Извините, произошла ошибка при обработке вашего запроса."
 
-# Команда для рассылки сообщений всем пользователям
+# Команда для смены модели (GPT-3.5 или GPT-4)
+@dp.message_handler(commands=["setmodel"])
+async def set_model(message: types.Message):
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("У тебя нет прав для использования этой команды.")
+        return
+
+    model = message.text[len("/setmodel "):].strip()
+    if model not in ["gpt-3.5-turbo", "gpt-4-turbo"]:
+        await message.answer("Пожалуйста, выбери одну из моделей: gpt-3.5-turbo или gpt-4-turbo.")
+        return
+
+    await message.answer(f"Модель изменена на {model}.")
+
+# Команда для рассылки сообщений
 @dp.message_handler(commands=["broadcast"])
 async def broadcast_message(message: types.Message):
     if message.from_user.id != ADMIN_ID:
@@ -126,15 +153,17 @@ async def broadcast_message(message: types.Message):
 
     await message.answer("Рассылка завершена!")
 
-# Хендлер для обработки сообщений от пользователей
+# Обработка сообщений от пользователей
 @dp.message_handler()
 async def handle_message(message: types.Message):
     user_id = message.from_user.id
-    save_user(user_id)  # Сохраняем ID пользователя
-    await bot.send_chat_action(chat_id=message.chat.id, action="typing")  # Эффект "печатает..."
-    reply = await ask_openai(user_id, message.text)  # Получаем ответ от OpenAI
-    await message.answer(reply)  # Отправляем ответ пользователю
+    save_user(user_id)
+    await bot.send_chat_action(chat_id=message.chat.id, action="typing")
+    model = "gpt-3.5-turbo" if message.text.lower().startswith("3.5") else "gpt-4-turbo"
+    reply = await ask_openai(user_id, message.text, model=model)
+    await message.answer(reply)
 
 # Запуск бота
 if __name__ == "__main__":
     executor.start_polling(dp, skip_updates=True)
+
